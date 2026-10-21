@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -95,11 +96,26 @@ class XtreamAPI {
       {Map<String, String> extra = const {}, bool cache = true}) async {
     final q = <String, String>{if (action.isNotEmpty) 'action': action, ...extra};
     final ck = DiskCache.keyOf('$server|$username|$q');
+    
+    // 👈 الحل: تجاهل أخطاء الشهادة (SSL) للسيرفرات التي لا تملك شهادة موثوقة
+    final client = http.Client();
+    client.badCertificateCallback = ((X509Certificate cert, String host, int port) => true);
+
     try {
-      final res = await http.get(_uri(q)).timeout(const Duration(seconds: 30));
+      final res = await client.get(
+        _uri(q),
+        headers: {
+          // 👈 إضافة User-Agent لتجاوز حماية السيرفر
+          'User-Agent': '4U-TV/3.4', 
+          'Accept': 'application/json',
+        },
+      ).timeout(const Duration(seconds: 60)); // زيادة المهلة إلى 60 ثانية
+      
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
+      
       final body = utf8.decode(res.bodyBytes, allowMalformed: true);
       final data = json.decode(body);
+      
       if (cache && action.isNotEmpty && ((data is List && data.isNotEmpty) || (data is Map && data.isNotEmpty))) {
         DiskCache.put(ck, body);
       }
@@ -114,6 +130,8 @@ class XtreamAPI {
         }
       }
       rethrow;
+    } finally {
+      client.close(); // إغلاق الاتصال بعد الانتهاء
     }
   }
 
