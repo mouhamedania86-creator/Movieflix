@@ -19,5 +19,9 @@ dependencies:
   timezone: ^0.9.4
   device_info_plus: ^10.1.0
 
+# 👈 إجبار Flutter على استخدام نسخة آمنة من shared_preferences_android
+dependency_overrides:
+  shared_preferences_android: '>=2.4.28 <2.5.0'
+
 flutter:
   uses-material-design: true
