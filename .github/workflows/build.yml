@@ -1,0 +1,170 @@
+name: Luciferplay Android Build
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    # بلا هاد السطر، إلا الـ build تعلق (Gradle download متعطل) كيبقى
+    # كيستنى 6 سوايع كاملة. 90 دقيقة كافية+.
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate clean Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf android
+          flutter create \
+            --template app \
+            --platforms android \
+            --project-name movieflix \
+            .
+          test -f android/app/src/main/AndroidManifest.xml
+          echo "Android project generated."
+
+      # ⬇️ moved هنا: setup-gradle kيتعرّف على الـ Gradle project من بعد ما
+      # يتولّد، باش يقدر يفعّل cache صح.
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Fix Android manifest
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text(encoding="utf-8")
+
+          permissions = [
+              '    <uses-permission android:name="android.permission.INTERNET"/>',
+              '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>',
+              '    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>',
+              '    <uses-permission android:name="android.permission.VIBRATE"/>',
+              '    <uses-feature android:name="android.software.leanback" android:required="false"/>',
+              '    <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>',
+          ]
+
+          for item in permissions:
+              if item not in s:
+                  s = s.replace("<application", item + "\n    <application", 1)
+
+          s = s.replace(
+              '<application',
+              '<application android:usesCleartextTraffic="true"',
+              1
+          ) if 'android:usesCleartextTraffic=' not in s else s
+
+          if 'android:name="android.intent.category.LEANBACK_LAUNCHER"' not in s:
+              launcher = '<category android:name="android.intent.category.LAUNCHER"/>'
+              if launcher in s:
+                  s = s.replace(
+                      launcher,
+                      launcher + '\n                <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>',
+                      1
+                  )
+
+          s = s.replace('android:label="movieflix"', 'android:label="Luciferplay"')
+          p.write_text(s, encoding="utf-8")
+          print("Manifest updated.")
+          PY
+
+      # THE FIX for:
+      #   > Dependency ':flutter_local_notifications' requires core library
+      #     desugaring to be enabled for :app
+      - name: Enable core library desugaring in the app module
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tool/patch_android_gradle.py
+
+      - name: Fix plugin Android Gradle configuration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cache = Path.home() / ".pub-cache"
+          patched = 0
+          for p in list(cache.glob("hosted/pub.dev/*/android/build.gradle")) + \
+                   list(cache.glob("hosted/pub.dev/*/android/build.gradle.kts")):
+              s = p.read_text(encoding="utf-8")
+              original = s
+              s = s.replace("flutter.compileSdkVersion", "36")
+              s = s.replace("flutter.minSdkVersion", "24")
+              s = s.replace("flutter.targetSdkVersion", "36")
+              if s != original:
+                  p.write_text(s, encoding="utf-8")
+                  patched += 1
+                  print(f"Patched {p}")
+          print(f"Patched {patched} plugin build file(s).")
+          PY
+
+      # ➕ تشخيص: كيطبع الملف المصلّح كامل، باش تبان فـ log شنو طايب
+      # بالضبط (حتى إلا الـ build طح فـ step لاحق).
+      - name: Show patched Android Gradle config
+        shell: bash
+        run: |
+          echo "===== android/app/build.gradle.kts ====="
+          cat android/app/build.gradle.kts
+          echo
+          echo "===== android/gradle.properties ====="
+          cat android/gradle.properties
+          echo
+          echo "===== flutter / java ====="
+          flutter --version || true
+          java -version 2>&1 || true
+
+      - name: Build phone APKs
+        run: flutter build apk --release --no-shrink --split-per-abi
+
+      - name: Build Android TV APK
+        run: flutter build apk --release --no-shrink --target-platform android-arm64 --dart-define=IS_TV=true
+
+      - name: Upload APK files
+        uses: actions/upload-artifact@v4
+        with:
+          name: Luciferplay-APKs
+          path: build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+
+      # ➕ تشخيص: خрыв حتى إلا الـ build طح، غادي نلقاو كلشي فـ log واحد
+      - name: Collect diagnostics
+        if: always()
+        shell: bash
+        run: |
+          echo "===== APKs produced ====="
+          ls -la build/app/outputs/flutter-apk/ 2>/dev/null || echo "no APKs found"
+          echo
+          echo "===== AndroidManifest ====="
+          cat android/app/src/main/AndroidManifest.xml 2>/dev/null || true
+          echo
+          echo "===== gradle.properties ====="
+          cat android/gradle.properties 2>/dev/null || true
+          echo
+          echo "===== pubspec.lock (plugin versions) ====="
+          grep -A2 -E "^  (flutter_local_notifications|media_kit|media_kit_libs_video|wakelock_plus|device_info_plus):" pubspec.lock 2>/dev/null || true

@@ -1,0 +1,23 @@
+name: movieflix
+description: MovieFlix App
+version: 1.0.0+1
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.1.0
+  cached_network_image: ^3.3.0
+  shared_preferences: ^2.2.2
+  path_provider: ^2.1.2
+  url_launcher: ^6.2.4
+  media_kit: ^1.1.10
+  media_kit_video: ^1.2.4
+  media_kit_libs_video: ^1.0.4
+  flutter_local_notifications: ^17.2.2
+  timezone: ^0.9.4
+  device_info_plus: ^10.1.0
+
+flutter:
+  uses-material-design: true
