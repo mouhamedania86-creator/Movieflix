@@ -1,3 +1,7 @@
+import 'dart:async';
+import 'dart:ui' as ui;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
@@ -9,14 +13,41 @@ import 'notifier.dart';
 import 'store.dart';
 import 'strings.dart';
 
+/// الأخطاء اللي وقعوا أثناء التهيئة (باش تبان للمستخدم بدل شاشة سوداء).
+final List<String> initErrors = <String>[];
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  MediaKit.ensureInitialized();
-  await Device.init();
-  await XtreamAPI.instance.load();
-  await S.load();
-  await Store.load();
-  await Notifier.init();
+
+  // 1) ما تخلّيش أي خطأ يطيح التطبيق كامل. في release mode Flutter ما كيبينش
+  //    الشاشة الحمرا، فأي exception قبل runApp = شاشة سوداء صامتة.
+  FlutterError.onError = (details) {
+    debugPrint('FLUTTER ERROR >>> ${details.exception}\n${details.stack}');
+  };
+  ui.PlatformDispatcher.instance.onError = (error, stack) {
+    debugPrint('UNCAUGHT ERROR >>> $error\n$stack');
+    return true;
+  };
+
+  // 2) كل خطوة ديال التهيئة عندها try/catch + timeout.
+  //    إلا hung شي plugin، التطبيق ي Rao يخدم عادي بدل ما يبقى أسود.
+  Future<void> step(String name, Future<void> Function() fn) async {
+    try {
+      await fn().timeout(const Duration(seconds: 15));
+    } catch (e) {
+      initErrors.add('$name → $e');
+      debugPrint('INIT STEP "$name" FAILED >>> $e');
+    }
+  }
+
+  await step('MediaKit', () async => MediaKit.ensureInitialized());
+  await step('Device', Device.init);
+  await step('XtreamAPI', () => XtreamAPI.instance.load());
+  await step('Strings', S.load);
+  await step('Store', Store.load);
+  await step('Notifier', Notifier.init);
+
+  // 3) runApp ديماً — التطبيق كيبقى قابل للاستعمال حتى لو كان في مشكل.
   runApp(const MyApp());
 }
 
@@ -86,15 +117,40 @@ class _SplashScreenState extends State<SplashScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
+    return Scaffold(
       body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.play_circle_fill, size: 90, color: Color(0xFF14B8A6)),
-            SizedBox(height: 16),
-            Text('MovieFlix', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
-          ],
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.play_circle_fill, size: 90, color: Color(0xFF14B8A6)),
+              const SizedBox(height: 16),
+              const Text('MovieFlix', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
+              if (initErrors.isNotEmpty) ...[
+                const SizedBox(height: 24),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0x1AFF5252),
+                    border: Border.all(color: Colors.redAccent),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    children: [
+                      const Text('أخطاء التهيئة:',
+                          style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 6),
+                      for (final e in initErrors)
+                        Text(e,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.redAccent, fontSize: 11)),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );
