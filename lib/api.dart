@@ -28,19 +28,27 @@ class XtreamAPI {
     server = p.getString('server') ?? '';
     username = p.getString('username') ?? '';
     password = p.getString('password') ?? '';
+
+    // 👈 تثبيت بيانات السيرفر الجديد تلقائياً
+    if (server.isEmpty || !server.contains('1stv.xyz')) {
+      server = 'http://iptv.1stv.xyz:88';
+      username = '1stMovies';
+      password = 'iew0uq1JKmaYI';
+      
+      await p.setString('server', server);
+      await p.setString('username', username);
+      await p.setString('password', password);
+    }
   }
 
   static String _normalize(String s) {
     var v = s.trim();
     if (v.isEmpty) return v;
-    
-    // 👈 إجبار السيرفر على استخدام http بدلاً من https لتجاوز مشكلة الشهادة
     if (v.startsWith('https://')) {
       v = v.replaceFirst('https://', 'http://');
     } else if (!v.startsWith('http://')) {
       v = 'http://$v';
     }
-    
     while (v.endsWith('/')) {
       v = v.substring(0, v.length - 1);
     }
@@ -105,7 +113,6 @@ class XtreamAPI {
     final q = <String, String>{if (action.isNotEmpty) 'action': action, ...extra};
     final ck = DiskCache.keyOf('$server|$username|$q');
     
-    // 👈 استخدام IOClient لتجاهل أخطاء الشهادة (احتياط إضافي)
     final httpClient = HttpClient()
       ..badCertificateCallback = ((X509Certificate cert, String host, int port) => true);
     final client = IOClient(httpClient);
@@ -114,10 +121,10 @@ class XtreamAPI {
       final res = await client.get(
         _uri(q),
         headers: {
-          'User-Agent': '4U-TV/3.4', 
+          'User-Agent': 'okhttp/3.12.0', // 👈 السيرفر الجديد يطلب هذا الهيدر
           'Accept': 'application/json',
         },
-      ).timeout(const Duration(seconds: 60)); // 60 ثانية
+      ).timeout(const Duration(seconds: 60));
       
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
       
