@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:http/io_client.dart'; // 👈 ضروري لحل مشكلة الشهادة
+import 'package:http/io_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'disk_cache.dart';
 
@@ -33,7 +33,14 @@ class XtreamAPI {
   static String _normalize(String s) {
     var v = s.trim();
     if (v.isEmpty) return v;
-    if (!v.startsWith('http://') && !v.startsWith('https://')) v = 'http://$v';
+    
+    // 👈 إجبار السيرفر على استخدام http بدلاً من https لتجاوز مشكلة الشهادة
+    if (v.startsWith('https://')) {
+      v = v.replaceFirst('https://', 'http://');
+    } else if (!v.startsWith('http://')) {
+      v = 'http://$v';
+    }
+    
     while (v.endsWith('/')) {
       v = v.substring(0, v.length - 1);
     }
@@ -98,7 +105,7 @@ class XtreamAPI {
     final q = <String, String>{if (action.isNotEmpty) 'action': action, ...extra};
     final ck = DiskCache.keyOf('$server|$username|$q');
     
-    // 👈 استخدام IOClient لتجاهل أخطاء الشهادة
+    // 👈 استخدام IOClient لتجاهل أخطاء الشهادة (احتياط إضافي)
     final httpClient = HttpClient()
       ..badCertificateCallback = ((X509Certificate cert, String host, int port) => true);
     final client = IOClient(httpClient);
@@ -132,7 +139,7 @@ class XtreamAPI {
       }
       rethrow;
     } finally {
-      client.close(); // إغلاق الاتصال
+      client.close();
     }
   }
 
