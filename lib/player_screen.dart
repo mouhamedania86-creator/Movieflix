@@ -14,8 +14,6 @@ class PlayerScreen extends StatefulWidget {
   final String? fallbackUrl;
   final bool isLive;
   final WatchEntry? watch;
-  
-  // 👈 خصائص التنقل بين الحلقات
   final String? seriesId;
   final int? seasonNumber;
   final int? episodeNumber;
@@ -48,9 +46,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
   int _pos = 0;
   int _dur = 0;
 
+  // 👈 متغيرات محلية لتخزين الحلقة الحالية
+  String _currentUrl = '';
+  String _currentTitle = '';
+  WatchEntry? _currentWatch;
+  int? _currentEpisodeNumber; // 👈 إضافة رقم الحلقة الحالية
+  bool _isDisposed = false; // 👈 لحماية المشغل من التدمير المزدوج
+
   @override
   void initState() {
     super.initState();
+    _currentUrl = widget.url;
+    _currentTitle = widget.title;
+    _currentWatch = widget.watch;
+    _currentEpisodeNumber = widget.episodeNumber;
+
     if (Device.isTouchMobile) {
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.landscapeLeft,
@@ -59,7 +69,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     }
 
-    _initPlayer(widget.url);
+    _initPlayer(_currentUrl);
     _saver = Timer.periodic(const Duration(seconds: 20), (_) => _save());
   }
 
@@ -79,7 +89,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> _start(String url) async {
     Duration? start;
-    final w = widget.watch;
+    final w = _currentWatch;
     if (!widget.isLive && w != null) {
       final saved = await Store.entry(w.key);
       if (saved != null && !saved.done && saved.pos > 10) {
@@ -101,7 +111,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _save() {
-    final w = widget.watch;
+    final w = _currentWatch;
     if (widget.isLive || w == null || _dur <= 0) return;
     
     final done = _completed || _pos >= _dur - 60;
@@ -114,7 +124,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _switchEpisode(dynamic ep) {
-    _save(); // حفظ الحلقة الحالية
+    _save();
     _saver?.cancel();
     for (final s in _subs) {
       s.cancel();
@@ -124,34 +134,34 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final epId = ep['id'].toString();
     final ext = (ep['container_extension'] ?? 'mp4').toString();
     final url = XtreamAPI.instance.buildSeriesUrl(epId, ext);
+    
+    // 👈 تحديث المتغيرات المحلية
+    final newEpNum = ep['episode_num'];
+    final newTitle = '${widget.title.split(' - ')[0]} - S${widget.seasonNumber} E$newEpNum';
+    final newWatch = WatchEntry.forEpisode(
+      widget.watch!.item,
+      epId,
+      ext,
+      'S${widget.seasonNumber} E$newEpNum',
+    );
 
     setState(() {
-      widget = PlayerScreen(
-        url: url,
-        title: '${widget.title.split(' - ')[0]} - S${widget.seasonNumber} E${ep['episode_num']}',
-        watch: WatchEntry.forEpisode(
-          widget.watch!.item, 
-          epId, 
-          ext, 
-          'S${widget.seasonNumber} E${ep['episode_num']}'
-        ),
-        isLive: false,
-        seriesId: widget.seriesId,
-        seasonNumber: widget.seasonNumber,
-        episodeNumber: ep['episode_num'],
-        allEpisodes: widget.allEpisodes,
-      );
+      _currentUrl = url;
+      _currentTitle = newTitle;
+      _currentWatch = newWatch;
+      _currentEpisodeNumber = newEpNum; // 👈 تحديث رقم الحلقة
     });
 
     _pos = 0;
     _dur = 0;
     _completed = false;
-    _initPlayer(url);
+    _initPlayer(_currentUrl);
     _saver = Timer.periodic(const Duration(seconds: 20), (_) => _save());
   }
 
   @override
   void dispose() {
+    _isDisposed = true; // 👈 حماية
     _saver?.cancel();
     _save();
     for (final s in _subs) {
@@ -192,12 +202,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // البحث عن الحلقة السابقة والتالية
     dynamic prevEp, nextEp;
-    if (widget.allEpisodes != null && widget.episodeNumber != null) {
+    // 👈 استخدام _currentEpisodeNumber للبحث عن الحلقة السابقة والتالية
+    if (widget.allEpisodes != null && _currentEpisodeNumber != null) {
       for (var e in widget.allEpisodes!) {
-        if (e['episode_num'] == widget.episodeNumber! - 1) prevEp = e;
-        if (e['episode_num'] == widget.episodeNumber! + 1) nextEp = e;
+        if (e['episode_num'] == _currentEpisodeNumber! - 1) prevEp = e;
+        if (e['episode_num'] == _currentEpisodeNumber! + 1) nextEp = e;
       }
     }
 
@@ -210,26 +220,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
       SizedBox(
         width: 200,
         child: Text(
-          widget.title,
+          _currentTitle,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(color: Colors.white),
         ),
       ),
       const Spacer(),
-      // 👈 زر الحلقة السابقة
       if (prevEp != null)
         IconButton(
           icon: const Icon(Icons.skip_previous, color: Colors.white),
           onPressed: () => _switchEpisode(prevEp),
         ),
-      // 👈 زر الحلقة التالية
       if (nextEp != null)
         IconButton(
           icon: const Icon(Icons.skip_next, color: Colors.white),
           onPressed: () => _switchEpisode(nextEp),
         ),
-      // 👈 زر سرعة التشغيل
       PopupMenuButton<double>(
         icon: const Icon(Icons.speed, color: Colors.white),
         initialValue: _player.state.rate,
@@ -277,7 +284,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
       );
     }
 
-    // 👈 مستشعر النقر المزدوج
     return Scaffold(
       backgroundColor: Colors.black,
       body: GestureDetector(
