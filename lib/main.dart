@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:media_kit/media_kit.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'api.dart';
 import 'device.dart';
 import 'home_screen.dart';
@@ -19,8 +22,6 @@ final List<String> initErrors = <String>[];
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1) ما تخلّيش أي خطأ يطيح التطبيق كامل. في release mode Flutter ما كيبينش
-  //    الشاشة الحمرا، فأي exception قبل runApp = شاشة سوداء صامتة.
   FlutterError.onError = (details) {
     debugPrint('FLUTTER ERROR >>> ${details.exception}\n${details.stack}');
   };
@@ -29,8 +30,6 @@ Future<void> main() async {
     return true;
   };
 
-  // 2) كل خطوة ديال التهيئة عندها try/catch + timeout.
-  //    إلا hung شي plugin، التطبيق ي Rao يخدم عادي بدل ما يبقى أسود.
   Future<void> step(String name, Future<void> Function() fn) async {
     try {
       await fn().timeout(const Duration(seconds: 15));
@@ -47,11 +46,9 @@ Future<void> main() async {
   await step('Store', Store.load);
   await step('Notifier', Notifier.init);
 
-  // 3) runApp ديماً — التطبيق كيبقى قابل للاستعمال حتى لو كان في مشكل.
   runApp(const MyApp());
 }
 
-/// يسمح بالسحب بالماوس على الكمبيوتر (الصفوف والشريط).
 class AppScrollBehavior extends MaterialScrollBehavior {
   const AppScrollBehavior();
   @override
@@ -101,9 +98,42 @@ class SplashScreen extends StatefulWidget {
 }
 
 class _SplashScreenState extends State<SplashScreen> {
+  bool _showUpdate = false;
+  String _updateUrl = '';
+
   @override
   void initState() {
     super.initState();
+    _checkUpdate();
+  }
+
+  Future<void> _checkUpdate() async {
+    try {
+      // 👈 ضع رابط ملف server.json هنا
+      const String configUrl = 'https://raw.githubusercontent.com/mouhamedania86-creator/Update/main/server.json';
+      final res = await http.get(Uri.parse(configUrl)).timeout(const Duration(seconds: 5));
+      
+      if (res.statusCode == 200) {
+        final data = json.decode(res.body);
+        final bool forceUpdate = data['force_update'] ?? false;
+        final String latestVersion = data['latest_version'] ?? '1.0.0';
+        final String updateUrl = data['update_url'] ?? '';
+
+        // إصدار التطبيق الحالي (يجب أن يطابق pubspec.yaml)
+        const String currentVersion = '1.0.1';
+
+        // 👈 إذا كان التحديث إجبارياً، والإصدار الحالي أقل من المطلوب
+        if (forceUpdate && currentVersion != latestVersion) {
+          setState(() {
+            _showUpdate = true;
+            _updateUrl = updateUrl;
+          });
+          return;
+        }
+      }
+    } catch (_) {}
+
+    // إذا لم يوجد تحديث، ننتقل للشاشة الرئيسية
     Future.delayed(const Duration(milliseconds: 1200), () {
       if (!mounted) return;
       Navigator.pushReplacement(
@@ -117,6 +147,39 @@ class _SplashScreenState extends State<SplashScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_showUpdate) {
+      return Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.system_update, size: 80, color: Colors.orange),
+                const SizedBox(height: 20),
+                const Text('تحديث إجباري', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 10),
+                const Text('يجب عليك تحديث التطبيق إلى الإصدار الجديد للاستمرار.', textAlign: TextAlign.center),
+                const SizedBox(height: 30),
+                SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF14B8A6)),
+                    onPressed: () {
+                      launchUrl(Uri.parse(_updateUrl), mode: LaunchMode.externalApplication);
+                    },
+                    icon: const Icon(Icons.download),
+                    label: const Text('تحميل التحديث الآن'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       body: Center(
         child: SingleChildScrollView(
