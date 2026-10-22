@@ -50,11 +50,31 @@ class _DetailsScreenState extends State<DetailsScreen> {
     if (mounted) setState(() => _isFav = now);
   }
 
-  void _play(String url, String title, {WatchEntry? watch, bool live = false, String? fallback}) {
+  // 👈 تعديل الدالة لتمرير معلومات الحلقات إلى المشغل
+  void _play(
+    String url,
+    String title, {
+    WatchEntry? watch,
+    bool live = false,
+    String? fallback,
+    List<dynamic>? allEps,
+    int? epNum,
+    int? seasonNum,
+  }) {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => PlayerScreen(url: url, title: title, watch: watch, fallbackUrl: fallback, isLive: live),
+        builder: (_) => PlayerScreen(
+          url: url,
+          title: title,
+          watch: watch,
+          fallbackUrl: fallback,
+          isLive: live,
+          allEpisodes: allEps, // 👈 تمرير قائمة الحلقات
+          episodeNumber: epNum, // 👈 تمرير رقم الحلقة الحالية
+          seasonNumber: seasonNum, // 👈 تمرير رقم الموسم
+          seriesId: _id,
+        ),
       ),
     );
   }
@@ -188,7 +208,18 @@ class _DetailsScreenState extends State<DetailsScreen> {
                   final ext = (ep['container_extension'] ?? 'mp4').toString();
                   final sub = 'S$s E${ep['episode_num'] ?? ''}';
                   final w = WatchEntry.forEpisode(widget.item, epId, ext, sub);
-                  _play(api.buildSeriesUrl(epId, ext), w.fullTitle, watch: w);
+                  
+                  // 👈 تمرير قائمة حلقات الموسم الحالي لتعمل أزرار التنقل
+                  final allEpisodesInSeason = eps[s];
+                  
+                  _play(
+                    api.buildSeriesUrl(epId, ext),
+                    w.fullTitle,
+                    watch: w,
+                    allEps: allEpisodesInSeason,
+                    epNum: ep['episode_num'],
+                    seasonNum: int.tryParse(s),
+                  );
                 },
               ),
           ],
