@@ -3,10 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'api.dart';
 import 'device.dart';
+import 'episodes.dart';
 import 'store.dart';
 import 'strings.dart';
-import 'api.dart';
 
 class PlayerScreen extends StatefulWidget {
   final String url;
@@ -14,10 +15,10 @@ class PlayerScreen extends StatefulWidget {
   final String? fallbackUrl;
   final bool isLive;
   final WatchEntry? watch;
-  final String? seriesId;
-  final int? seasonNumber;
-  final int? episodeNumber;
-  final List<dynamic>? allEpisodes;
+
+  /// كل حلقات المسلسل مرتبة (من flattenEpisodes). إذا ما تعطاتش،
+  /// المشغل يجيبها وحدو للمسلسلات.
+  final List<Map<String, dynamic>>? episodes;
 
   const PlayerScreen({
     super.key,
@@ -26,10 +27,7 @@ class PlayerScreen extends StatefulWidget {
     this.fallbackUrl,
     this.isLive = false,
     this.watch,
-    this.seriesId,
-    this.seasonNumber,
-    this.episodeNumber,
-    this.allEpisodes,
+    this.episodes,
   });
 
   @override
@@ -37,29 +35,35 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  late Player _player;
-  late VideoController _video;
+  // مشغل واحد طول الوقت: نبدلو الحلقة بـ open() بلا ما نعاودو نصنعو Player جديد
+  late final Player _player;
+  late final VideoController _video;
   final List<StreamSubscription> _subs = [];
   Timer? _saver;
+
   bool _triedFallback = false;
   bool _completed = false;
+  bool _resumePending = false; // ما نحفظوش التقدم وقت استرجاع آخر نقطة
+  bool _advancing = false;
   int _pos = 0;
   int _dur = 0;
+  int _gen = 0; // يلغي العمليات القديمة كي تتبدل الحلقة بسرعة
 
-  // 👈 متغيرات محلية لتخزين الحلقة الحالية
-  String _currentUrl = '';
-  String _currentTitle = '';
-  WatchEntry? _currentWatch;
-  int? _currentEpisodeNumber; // 👈 إضافة رقم الحلقة الحالية
-  bool _isDisposed = false; // 👈 لحماية المشغل من التدمير المزدوج
+  late String _title;
+  WatchEntry? _watch;
+  List<Map<String, dynamic>>? _episodes;
+  int _index = -1;
+
+  bool get _hasPrev => _episodes != null && _index > 0;
+  bool get _hasNext => _episodes != null && _index >= 0 && _index < _episodes!.length - 1;
 
   @override
   void initState() {
     super.initState();
-    _currentUrl = widget.url;
-    _currentTitle = widget.title;
-    _currentWatch = widget.watch;
-    _currentEpisodeNumber = widget.episodeNumber;
+    _title = widget.title;
+    _watch = widget.watch;
+    _episodes = widget.episodes;
+    _index = _indexOfCurrent();
 
     if (Device.isTouchMobile) {
       SystemChrome.setPreferredOrientations([
@@ -69,35 +73,112 @@ class _PlayerScreenState extends State<PlayerScreen> {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     }
 
-    _initPlayer(_currentUrl);
-    _saver = Timer.periodic(const Duration(seconds: 20), (_) => _save());
-  }
-
-  void _initPlayer(String url) {
     _player = Player(configuration: const PlayerConfiguration(bufferSize: 64 * 1024 * 1024));
     _video = VideoController(_player);
 
     _subs.add(_player.stream.position.listen((p) => _pos = p.inSeconds));
     _subs.add(_player.stream.duration.listen((d) => _dur = d.inSeconds));
-    _subs.add(_player.stream.completed.listen((c) {
-      if (c) _completed = true;
-    }));
+    _subs.add(_player.stream.completed.listen(_onCompleted));
     _subs.add(_player.stream.error.listen(_onError));
-    
-    _start(url);
+    _saver = Timer.periodic(const Duration(seconds: 20), (_) => _save());
+
+    _open(widget.url);
+    _ensureEpisodes();
   }
 
-  Future<void> _start(String url) async {
+  int _indexOfCurrent() {
+    final w = _watch;
+    final eps = _episodes;
+    if (w == null || eps == null) return -1;
+    return eps.indexWhere((e) => e['id'] == w.mediaId);
+  }
+
+  /// كي نكملو من "تابع المشاهدة" ما عندناش قائمة الحلقات، نجيبوها.
+  Future<void> _ensureEpisodes() async {
+    final w = _watch;
+    if (_episodes != null || w == null || w.type != 'series') return;
+    try {
+      final info = await XtreamAPI.instance.getSeriesInfo(w.itemId);
+      final flat = flattenEpisodes(info?['episodes']);
+      final idx = flat.indexWhere((e) => e['id'] == w.mediaId);
+      if (!mounted || idx < 0) return;
+      setState(() {
+        _episodes = flat;
+        _index = idx;
+      });
+    } catch (_) {}
+  }
+
+  /// يفتح الرابط ويكمل من آخر نقطة محفوظة.
+  Future<void> _open(String url) async {
+    final gen = ++_gen;
     Duration? start;
-    final w = _currentWatch;
+    final w = _watch;
     if (!widget.isLive && w != null) {
       final saved = await Store.entry(w.key);
       if (saved != null && !saved.done && saved.pos > 10) {
         start = Duration(seconds: saved.pos);
       }
     }
-    if (!mounted) return;
-    await _player.open(Media(url, start: start), play: true);
+    if (!mounted || gen != _gen) return;
+
+    _resumePending = start != null;
+    try {
+      await _player.open(Media(url, start: start), play: true);
+      if (start != null) await _seekWhenReady(start, gen);
+    } finally {
+      if (gen == _gen) _resumePending = false;
+    }
+  }
+
+  /// بعض السيرفرات تتجاهل start، فنعملو seek صريح بعد ما المدة تتعرف.
+  Future<void> _seekWhenReady(Duration target, int gen) async {
+    try {
+      if (_player.state.duration <= Duration.zero) {
+        await _player.stream.duration
+            .firstWhere((d) => d > Duration.zero)
+            .timeout(const Duration(seconds: 25));
+      }
+      for (var i = 0; i < 3; i++) {
+        if (!mounted || gen != _gen) return;
+        final cur = _player.state.position;
+        if ((target - cur).inSeconds.abs() <= 5) return;
+        await _player.seek(target);
+        await Future.delayed(const Duration(milliseconds: 1200));
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _goTo(int i) async {
+    final eps = _episodes;
+    final w = _watch;
+    if (eps == null || w == null || i < 0 || i >= eps.length) return;
+
+    _save(); // نحفظو الحلقة الحالية قبل ما نبدلو
+    final ep = eps[i];
+    final sub = 'S${ep['season']} E${ep['num']}';
+    final nw = WatchEntry.forEpisode(w.item, ep['id'] as String, ep['ext'] as String, sub);
+
+    setState(() {
+      _index = i;
+      _watch = nw;
+      _title = nw.fullTitle;
+      _completed = false;
+      _pos = 0;
+      _dur = 0;
+    });
+    await _open(XtreamAPI.instance.buildSeriesUrl(nw.mediaId, nw.ext));
+  }
+
+  void _onCompleted(bool c) {
+    if (!c || widget.isLive) return;
+    // إذا انقطع البث قبل النهاية ما نعتبروهاش خلصت
+    if (_dur > 0 && _pos < _dur - 90) return;
+    _completed = true;
+    if (_hasNext && !_advancing) {
+      _advancing = true;
+      _goTo(_index + 1).whenComplete(() => _advancing = false);
+    }
   }
 
   void _onError(String error) {
@@ -111,57 +192,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _save() {
-    final w = _currentWatch;
-    if (widget.isLive || w == null || _dur <= 0) return;
-    
-    final done = _completed || _pos >= _dur - 60;
+    final w = _watch;
+    if (widget.isLive || w == null || _resumePending) return;
+    final dur = _dur > 0 ? _dur : _player.state.duration.inSeconds;
+    if (dur <= 0) return;
+    final done = _completed || (dur > 120 && _pos >= dur - 60);
+    if (!done && _pos < 10) return; // ما نمسحوش تقدم قديم بوقت قصير
     Store.saveWatch(w.copyWith(
       pos: done ? 0 : _pos,
-      dur: _dur,
+      dur: dur,
       ts: DateTime.now().millisecondsSinceEpoch,
       done: done,
     ));
   }
 
-  void _switchEpisode(dynamic ep) {
-    _save();
-    _saver?.cancel();
-    for (final s in _subs) {
-      s.cancel();
-    }
-    _player.dispose();
-
-    final epId = ep['id'].toString();
-    final ext = (ep['container_extension'] ?? 'mp4').toString();
-    final url = XtreamAPI.instance.buildSeriesUrl(epId, ext);
-    
-    // 👈 تحديث المتغيرات المحلية
-    final newEpNum = ep['episode_num'];
-    final newTitle = '${widget.title.split(' - ')[0]} - S${widget.seasonNumber} E$newEpNum';
-    final newWatch = WatchEntry.forEpisode(
-      widget.watch!.item,
-      epId,
-      ext,
-      'S${widget.seasonNumber} E$newEpNum',
-    );
-
-    setState(() {
-      _currentUrl = url;
-      _currentTitle = newTitle;
-      _currentWatch = newWatch;
-      _currentEpisodeNumber = newEpNum; // 👈 تحديث رقم الحلقة
-    });
-
-    _pos = 0;
-    _dur = 0;
-    _completed = false;
-    _initPlayer(_currentUrl);
-    _saver = Timer.periodic(const Duration(seconds: 20), (_) => _save());
-  }
-
   @override
   void dispose() {
-    _isDisposed = true; // 👈 حماية
+    _gen++;
     _saver?.cancel();
     _save();
     for (final s in _subs) {
@@ -190,6 +237,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       const SingleActivator(LogicalKeyboardKey.mediaPlay): () => _player.play(),
       const SingleActivator(LogicalKeyboardKey.mediaPause): () => _player.pause(),
       const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () => _player.playOrPause(),
+      const SingleActivator(LogicalKeyboardKey.mediaTrackNext): () {
+        if (_hasNext) _goTo(_index + 1);
+      },
+      const SingleActivator(LogicalKeyboardKey.mediaTrackPrevious): () {
+        if (_hasPrev) _goTo(_index - 1);
+      },
       const SingleActivator(LogicalKeyboardKey.space): () => _player.playOrPause(),
       const SingleActivator(LogicalKeyboardKey.select): () => _player.playOrPause(),
       const SingleActivator(LogicalKeyboardKey.enter): () => _player.playOrPause(),
@@ -202,15 +255,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    dynamic prevEp, nextEp;
-    // 👈 استخدام _currentEpisodeNumber للبحث عن الحلقة السابقة والتالية
-    if (widget.allEpisodes != null && _currentEpisodeNumber != null) {
-      for (var e in widget.allEpisodes!) {
-        if (e['episode_num'] == _currentEpisodeNumber! - 1) prevEp = e;
-        if (e['episode_num'] == _currentEpisodeNumber! + 1) nextEp = e;
-      }
-    }
-
     final topBar = <Widget>[
       IconButton(
         icon: const Icon(Icons.arrow_back, color: Colors.white),
@@ -220,22 +264,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
       SizedBox(
         width: 200,
         child: Text(
-          _currentTitle,
+          _title,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(color: Colors.white),
         ),
       ),
       const Spacer(),
-      if (prevEp != null)
+      if (_hasPrev)
         IconButton(
           icon: const Icon(Icons.skip_previous, color: Colors.white),
-          onPressed: () => _switchEpisode(prevEp),
+          onPressed: () => _goTo(_index - 1),
         ),
-      if (nextEp != null)
+      if (_hasNext)
         IconButton(
           icon: const Icon(Icons.skip_next, color: Colors.white),
-          onPressed: () => _switchEpisode(nextEp),
+          onPressed: () => _goTo(_index + 1),
         ),
       PopupMenuButton<double>(
         icon: const Icon(Icons.speed, color: Colors.white),
@@ -244,13 +288,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _player.setRate(value);
           setState(() {});
         },
-        itemBuilder: (context) => [
-          const PopupMenuItem(value: 0.5, child: Text('0.5x')),
-          const PopupMenuItem(value: 0.75, child: Text('0.75x')),
-          const PopupMenuItem(value: 1.0, child: Text('عادي (1x)')),
-          const PopupMenuItem(value: 1.25, child: Text('1.25x')),
-          const PopupMenuItem(value: 1.5, child: Text('1.5x')),
-          const PopupMenuItem(value: 2.0, child: Text('2.0x')),
+        itemBuilder: (context) => const [
+          PopupMenuItem(value: 0.5, child: Text('0.5x')),
+          PopupMenuItem(value: 0.75, child: Text('0.75x')),
+          PopupMenuItem(value: 1.0, child: Text('1x')),
+          PopupMenuItem(value: 1.25, child: Text('1.25x')),
+          PopupMenuItem(value: 1.5, child: Text('1.5x')),
+          PopupMenuItem(value: 2.0, child: Text('2x')),
         ],
       ),
     ];
@@ -286,22 +330,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     return Scaffold(
       backgroundColor: Colors.black,
-      body: GestureDetector(
-        onDoubleTapDown: (details) {
-          final screenWidth = MediaQuery.of(context).size.width;
-          final tapPosition = details.globalPosition.dx;
-
-          if (tapPosition > screenWidth / 2) {
-            final newPos = _player.state.position + const Duration(seconds: 10);
-            _player.seek(newPos);
-          } else {
-            var newPos = _player.state.position - const Duration(seconds: 10);
-            if (newPos < Duration.zero) newPos = Duration.zero;
-            _player.seek(newPos);
-          }
-        },
-        child: video,
-      ),
+      body: Device.isTouchMobile
+          ? GestureDetector(
+              onDoubleTapDown: (details) {
+                final w = MediaQuery.of(context).size.width;
+                final cur = _player.state.position;
+                if (details.globalPosition.dx > w / 2) {
+                  _player.seek(cur + const Duration(seconds: 10));
+                } else {
+                  final p = cur - const Duration(seconds: 10);
+                  _player.seek(p < Duration.zero ? Duration.zero : p);
+                }
+              },
+              child: video,
+            )
+          : video,
     );
   }
 }
