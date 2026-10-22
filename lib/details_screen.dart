@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'api.dart';
+import 'episodes.dart';
 import 'player_screen.dart';
 import 'store.dart';
 import 'strings.dart';
@@ -50,16 +51,13 @@ class _DetailsScreenState extends State<DetailsScreen> {
     if (mounted) setState(() => _isFav = now);
   }
 
-  // 👈 تعديل الدالة لتمرير معلومات الحلقات إلى المشغل
   void _play(
     String url,
     String title, {
     WatchEntry? watch,
     bool live = false,
     String? fallback,
-    List<dynamic>? allEps,
-    int? epNum,
-    int? seasonNum,
+    List<Map<String, dynamic>>? episodes,
   }) {
     Navigator.push(
       context,
@@ -70,10 +68,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
           watch: watch,
           fallbackUrl: fallback,
           isLive: live,
-          allEpisodes: allEps, // 👈 تمرير قائمة الحلقات
-          episodeNumber: epNum, // 👈 تمرير رقم الحلقة الحالية
-          seasonNumber: seasonNum, // 👈 تمرير رقم الموسم
-          seriesId: _id,
+          episodes: episodes,
         ),
       ),
     );
@@ -208,17 +203,11 @@ class _DetailsScreenState extends State<DetailsScreen> {
                   final ext = (ep['container_extension'] ?? 'mp4').toString();
                   final sub = 'S$s E${ep['episode_num'] ?? ''}';
                   final w = WatchEntry.forEpisode(widget.item, epId, ext, sub);
-                  
-                  // 👈 تمرير قائمة حلقات الموسم الحالي لتعمل أزرار التنقل
-                  final allEpisodesInSeason = eps[s];
-                  
                   _play(
                     api.buildSeriesUrl(epId, ext),
                     w.fullTitle,
                     watch: w,
-                    allEps: allEpisodesInSeason,
-                    epNum: ep['episode_num'],
-                    seasonNum: int.tryParse(s),
+                    episodes: flattenEpisodes(_info?['episodes']),
                   );
                 },
               ),
