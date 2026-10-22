@@ -6,8 +6,6 @@ import 'package:http/io_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'disk_cache.dart';
 
-/// عميل Xtream API. بيانات الدخول يدخلها المستخدم ويتم حفظها محلياً.
-/// الردود تتخزن على القرص، وإذا ما فماش إنترنت يعرض آخر نسخة محفوظة.
 class XtreamAPI {
   XtreamAPI._();
   static final XtreamAPI instance = XtreamAPI._();
@@ -29,12 +27,31 @@ class XtreamAPI {
     username = p.getString('username') ?? '';
     password = p.getString('password') ?? '';
 
-    // 👈 تثبيت بيانات السيرفر الجديد تلقائياً
-    if (server.isEmpty || !server.contains('1stv.xyz')) {
-      server = 'http://iptv.1stv.xyz:88';
-      username = '1stMovies';
-      password = 'iew0uq1JKmaYI';
-      
+    // 👈 رابط ملف الإعدادات على GitHub
+    const String configUrl = 'https://raw.githubusercontent.com/mouhamedania86-creator/Update/main/server.json';
+
+    try {
+      final res = await http.get(Uri.parse(configUrl)).timeout(const Duration(seconds: 5));
+      if (res.statusCode == 200) {
+        final data = json.decode(res.body);
+        server = data['server'] ?? server;
+        username = data['username'] ?? username;
+        password = data['password'] ?? password;
+        
+        await p.setString('server', server);
+        await p.setString('username', username);
+        await p.setString('password', password);
+        return; 
+      }
+    } catch (_) {
+      // إذا فشل الاتصال، نستخدم المحفوظ
+    }
+
+    // إذا كانت الذاكرة فارغة، نضع Ultra4K كافتراضي
+    if (server.isEmpty) {
+      server = 'http://ultra4k.gamerdz1517.com:80';
+      username = 'ultra4k';
+      password = 'gamerdz1517';
       await p.setString('server', server);
       await p.setString('username', username);
       await p.setString('password', password);
@@ -55,7 +72,6 @@ class XtreamAPI {
     return v;
   }
 
-  /// يرجع null عند النجاح، أو مفتاح رسالة الخطأ.
   Future<String?> login(String s, String u, String p) async {
     final old = [server, username, password];
     void restore() {
@@ -98,7 +114,6 @@ class XtreamAPI {
     await DiskCache.clear();
   }
 
-  // ---------------- الطلبات ----------------
   Uri _uri(Map<String, String> q) {
     final base = Uri.parse('$server/player_api.php');
     return base.replace(queryParameters: {
@@ -121,7 +136,7 @@ class XtreamAPI {
       final res = await client.get(
         _uri(q),
         headers: {
-          'User-Agent': 'okhttp/3.12.0', // 👈 السيرفر الجديد يطلب هذا الهيدر
+          'User-Agent': 'okhttp/3.12.0',
           'Accept': 'application/json',
         },
       ).timeout(const Duration(seconds: 60));
@@ -150,7 +165,6 @@ class XtreamAPI {
     }
   }
 
-  /// type: vod | series | live
   Future<List<dynamic>> getCategories(String type) async {
     try {
       final data = await _fetch('get_${type}_categories');
@@ -224,14 +238,12 @@ class XtreamAPI {
         .toList();
   }
 
-  // ---------------- روابط التشغيل ----------------
   String get _cred => '${Uri.encodeComponent(username)}/${Uri.encodeComponent(password)}';
   String buildMovieUrl(String id, String ext) => '$server/movie/$_cred/$id.$ext';
   String buildSeriesUrl(String id, String ext) => '$server/series/$_cred/$id.$ext';
   String buildLiveUrl(String id) => '$server/live/$_cred/$id.m3u8';
   String buildLiveUrlTs(String id) => '$server/live/$_cred/$id.ts';
 
-  // ---------------- المفضلة ----------------
   static String idOf(dynamic item, String type) =>
       (type == 'series' ? item['series_id'] : item['stream_id']).toString();
 
@@ -251,7 +263,6 @@ class XtreamAPI {
     return favs.any((f) => f['_type'] == type && idOf(f, type) == id);
   }
 
-  /// يرجع true إذا أصبح العنصر في المفضلة.
   Future<bool> toggleFavorite(String type, dynamic item) async {
     final p = await SharedPreferences.getInstance();
     final favs = await getFavorites();
