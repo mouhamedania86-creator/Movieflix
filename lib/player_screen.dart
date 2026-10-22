@@ -6,16 +6,21 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'device.dart';
 import 'store.dart';
 import 'strings.dart';
+import 'api.dart';
 
-/// مشغل بملء الشاشة:
-/// - هاتف/iPhone: سحب عمودي يسار = السطوع، يمين = الصوت، أفقي = تقديم/تأخير.
-/// - كمبيوتر/تلفزة: كيبورد وريموت (OK = إيقاف/تشغيل، يمين/يسار = ±10 ثواني، فوق/تحت = الصوت).
 class PlayerScreen extends StatefulWidget {
   final String url;
   final String title;
   final String? fallbackUrl;
   final bool isLive;
-  final WatchEntry? watch; // لحفظ التقدم و"تابع المشاهدة"
+  final WatchEntry? watch;
+  
+  // 👈 خصائص التنقل بين الحلقات
+  final String? seriesId;
+  final int? seasonNumber;
+  final int? episodeNumber;
+  final List<dynamic>? allEpisodes;
+
   const PlayerScreen({
     super.key,
     required this.url,
@@ -23,6 +28,10 @@ class PlayerScreen extends StatefulWidget {
     this.fallbackUrl,
     this.isLive = false,
     this.watch,
+    this.seriesId,
+    this.seasonNumber,
+    this.episodeNumber,
+    this.allEpisodes,
   });
 
   @override
@@ -30,8 +39,8 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  late final Player _player;
-  late final VideoController _video;
+  late Player _player;
+  late VideoController _video;
   final List<StreamSubscription> _subs = [];
   Timer? _saver;
   bool _triedFallback = false;
@@ -50,6 +59,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     }
 
+    _initPlayer(widget.url);
+    _saver = Timer.periodic(const Duration(seconds: 20), (_) => _save());
+  }
+
+  void _initPlayer(String url) {
     _player = Player(configuration: const PlayerConfiguration(bufferSize: 64 * 1024 * 1024));
     _video = VideoController(_player);
 
@@ -59,11 +73,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (c) _completed = true;
     }));
     _subs.add(_player.stream.error.listen(_onError));
-    _saver = Timer.periodic(const Duration(seconds: 20), (_) => _save());
-    _start();
+    
+    _start(url);
   }
 
-  Future<void> _start() async {
+  Future<void> _start(String url) async {
     Duration? start;
     final w = widget.watch;
     if (!widget.isLive && w != null) {
@@ -73,7 +87,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
     }
     if (!mounted) return;
-    await _player.open(Media(widget.url, start: start), play: true);
+    await _player.open(Media(url, start: start), play: true);
   }
 
   void _onError(String error) {
@@ -88,7 +102,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   void _save() {
     final w = widget.watch;
-    if (widget.isLive || w == null || _dur <= 0 || _pos < 10) return;
+    if (widget.isLive || w == null || _dur <= 0) return;
+    
     final done = _completed || _pos >= _dur - 60;
     Store.saveWatch(w.copyWith(
       pos: done ? 0 : _pos,
@@ -96,6 +111,43 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ts: DateTime.now().millisecondsSinceEpoch,
       done: done,
     ));
+  }
+
+  void _switchEpisode(dynamic ep) {
+    _save(); // حفظ الحلقة الحالية
+    _saver?.cancel();
+    for (final s in _subs) {
+      s.cancel();
+    }
+    _player.dispose();
+
+    final epId = ep['id'].toString();
+    final ext = (ep['container_extension'] ?? 'mp4').toString();
+    final url = XtreamAPI.instance.buildSeriesUrl(epId, ext);
+
+    setState(() {
+      widget = PlayerScreen(
+        url: url,
+        title: '${widget.title.split(' - ')[0]} - S${widget.seasonNumber} E${ep['episode_num']}',
+        watch: WatchEntry.forEpisode(
+          widget.watch!.item, 
+          epId, 
+          ext, 
+          'S${widget.seasonNumber} E${ep['episode_num']}'
+        ),
+        isLive: false,
+        seriesId: widget.seriesId,
+        seasonNumber: widget.seasonNumber,
+        episodeNumber: ep['episode_num'],
+        allEpisodes: widget.allEpisodes,
+      );
+    });
+
+    _pos = 0;
+    _dur = 0;
+    _completed = false;
+    _initPlayer(url);
+    _saver = Timer.periodic(const Duration(seconds: 20), (_) => _save());
   }
 
   @override
@@ -140,6 +192,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // البحث عن الحلقة السابقة والتالية
+    dynamic prevEp, nextEp;
+    if (widget.allEpisodes != null && widget.episodeNumber != null) {
+      for (var e in widget.allEpisodes!) {
+        if (e['episode_num'] == widget.episodeNumber! - 1) prevEp = e;
+        if (e['episode_num'] == widget.episodeNumber! + 1) nextEp = e;
+      }
+    }
+
     final topBar = <Widget>[
       IconButton(
         icon: const Icon(Icons.arrow_back, color: Colors.white),
@@ -147,13 +208,43 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ),
       const SizedBox(width: 8),
       SizedBox(
-        width: 260,
+        width: 200,
         child: Text(
           widget.title,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(color: Colors.white),
         ),
+      ),
+      const Spacer(),
+      // 👈 زر الحلقة السابقة
+      if (prevEp != null)
+        IconButton(
+          icon: const Icon(Icons.skip_previous, color: Colors.white),
+          onPressed: () => _switchEpisode(prevEp),
+        ),
+      // 👈 زر الحلقة التالية
+      if (nextEp != null)
+        IconButton(
+          icon: const Icon(Icons.skip_next, color: Colors.white),
+          onPressed: () => _switchEpisode(nextEp),
+        ),
+      // 👈 زر سرعة التشغيل
+      PopupMenuButton<double>(
+        icon: const Icon(Icons.speed, color: Colors.white),
+        initialValue: _player.state.rate,
+        onSelected: (value) {
+          _player.setRate(value);
+          setState(() {});
+        },
+        itemBuilder: (context) => [
+          const PopupMenuItem(value: 0.5, child: Text('0.5x')),
+          const PopupMenuItem(value: 0.75, child: Text('0.75x')),
+          const PopupMenuItem(value: 1.0, child: Text('عادي (1x)')),
+          const PopupMenuItem(value: 1.25, child: Text('1.25x')),
+          const PopupMenuItem(value: 1.5, child: Text('1.5x')),
+          const PopupMenuItem(value: 2.0, child: Text('2.0x')),
+        ],
       ),
     ];
 
@@ -186,6 +277,25 @@ class _PlayerScreenState extends State<PlayerScreen> {
       );
     }
 
-    return Scaffold(backgroundColor: Colors.black, body: video);
+    // 👈 مستشعر النقر المزدوج
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: GestureDetector(
+        onDoubleTapDown: (details) {
+          final screenWidth = MediaQuery.of(context).size.width;
+          final tapPosition = details.globalPosition.dx;
+
+          if (tapPosition > screenWidth / 2) {
+            final newPos = _player.state.position + const Duration(seconds: 10);
+            _player.seek(newPos);
+          } else {
+            var newPos = _player.state.position - const Duration(seconds: 10);
+            if (newPos < Duration.zero) newPos = Duration.zero;
+            _player.seek(newPos);
+          }
+        },
+        child: video,
+      ),
+    );
   }
 }
